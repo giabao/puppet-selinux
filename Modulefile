@@ -1,11 +1,10 @@
-name    'spiette-selinux'
-version '0.1.2'
-source 'http://github.com/spiette/puppet-selinux'
-author 'spiette'
+name 'sandinh-selinux'
+version '0.1.3'
+
+author 'giabao'
 license 'Apache License, Version 2.0'
+project_page 'https://sandinh.com'
+source 'http://github.com/giabao/puppet-selinux'
 summary 'This class manages SELinux on RHEL based systems.'
 description 'This class manages SELinux on RHEL based systems.'
-project_page 'http://github.com/spiette/puppet-selinux'
-
-## Add dependencies, if any:
-dependency 'puppetlabs/stdlib', '>= 2.0.0'
+dependency 'puppetlabs/stdlib', '>=2.0.0'
