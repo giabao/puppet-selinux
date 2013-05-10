@@ -10,11 +10,12 @@
 #     (present|absent) - sets the state for a module
 #
 #   [*modules_dir*]
-#      The directory compiled modules will live on a system. Defaults to
+#      The directory where compiled modules will live on a system. Defaults to
 #      /usr/share/selinux declared in $selinux::params
 #
 #   [*source*]
-#     Source file (either a puppet URI or local file) of the SELinux .te module
+#     Source directory (either a puppet URI or local file) of the SELinux .te
+#     module. Defaults to puppet:///modules/selinux/${name}
 #
 # ===  Example
 #
@@ -23,16 +24,48 @@
 #    }
 #
 define selinux::module(
-  $source,
   $ensure  = 'present',
+  $source = undef,
   $modules_dir = undef,
 ) {
   include selinux
   include selinux::install
+
+  $ensures = [ 'present', 'enabled', 'disabled', 'absent' ]
+  if !( $ensure in $ensures ) {
+    $ensure_string = join($ensures, ', ')
+    fail("Selinux::Module[${name}]:
+      ensure parameter should be one of ${ensure_string}")
+  }
+
   if $modules_dir {
     $selinux_modules_dir = $modules_dir
   } else {
     $selinux_modules_dir = $selinux::params::modules_dir
+  }
+  # .te and .fc files will be placed on a $name directory
+  $this_module_dir = "${selinux_modules_dir}/${name}"
+
+  if $source {
+    $sourcedir = $source
+  } else {
+    $sourcedir = "puppet:///modules/selinux/${name}"
+  }
+  # sourcedir validation
+  # we only accept puppet:///modules/<something>/<something>, file:///anything
+  # we reject .te
+  case $sourcedir {
+    /^puppet:\/\/\/modules\/.*.te/: {
+      fail('Invalid source parameter, expecting a directory')
+    }
+    /^puppet:\/\/\/modules\/[^\/]+\/[^\/]+\/?$/: { }
+    /^file:\/\/\/.*$/: { }
+    default: {
+      fail('Invalid source parameter')
+    }
+  }
+  if $sourcedir !~ /^((puppet|file):.*\/([^\/]*))/ {
+    fail('Invalid source parameter')
   }
 
   # Set Resource Defaults
@@ -42,61 +75,75 @@ define selinux::module(
     mode  => '0640',
   }
 
-  # Only allow refresh in the event that the initial .te file is updated.
+  # Only allow refresh in the event that the initial source files are updated.
   Exec {
     path        => '/sbin:/usr/sbin:/bin:/usr/bin',
-    refreshonly => true,
-    cwd         => $selinux_modules_dir,
+    cwd         => $this_module_dir,
   }
 
   $active_modules = '/etc/selinux/targeted/modules/active/modules'
-  # Specific executables based on present or absent.
+  $active_pp = "${active_modules}/${name}.pp"
+  $compiled_pp = "${this_module_dir}/${name}.pp"
   case $ensure {
     present: {
-      ## Begin Configuration
-      file { "${selinux_modules_dir}/${name}.te":
-        ensure  => $ensure,
-        source  => $source,
-        tag     => 'selinux-module',
-        require => File[$selinux_modules_dir],
-      }
-      file { "${selinux_modules_dir}/${name}.mod":
-        tag => ['selinux-module-build', 'selinux-module'],
-      }
-      file { "${selinux_modules_dir}/${name}.pp":
-        tag => ['selinux-module-build', 'selinux-module'],
+      File[$this_module_dir]->
+      File["${this_module_dir}/${name}.te"]~>
+      Exec["${name}-makemod"]~>
+      Selmodule[$name]
+
+      file { $this_module_dir:
+        ensure  => directory,
+        source  => $sourcedir,
+        recurse => remote,
       }
 
-      exec { "${name}-buildmod":
-        command => "checkmodule -M -m -o ${name}.mod ${name}.te",
-      }
-      exec { "${name}-buildpp":
-        command => "semodule_package -m ${name}.mod -o ${name}.pp",
-      }
-      exec { "${name}-install":
-        command => "semodule -i ${name}.pp",
+      file { "${this_module_dir}/${name}.te":
+        ensure => file,
+        source => "${sourcedir}/${name}.te",
       }
 
-      # Set dependency ordering
-      File["${selinux_modules_dir}/${name}.te"]
-      ~> Exec["${name}-buildmod"]
-      ~> Exec["${name}-buildpp"]
-      ~> Exec["${name}-install"]
-      -> File<| tag == 'selinux-module-build' |>
+      exec { "${name}-makemod":
+        command     => 'make -f /usr/share/selinux/devel/Makefile',
+        refreshonly => true,
+      }
+
+      selmodule { $name:
+        ensure        => present,
+        selmodulepath => $compiled_pp,
+        syncversion   => true,
+      }
+
+      # Make sure our module is not disabled
+      exec { "${name}-enable":
+        command => "semodule -e ${name}",
+        onlyif  => "test -f ${active_pp}.disabled",
+      }
     }
-    disable: {
-      exec { "${name}-disable":
+    enabled: {
+      exec { "${name}-enabled":
+        command => "semodule -e ${name}",
+        onlyif  => "test -f ${active_pp}.disabled",
+      }
+    }
+    disabled: {
+      exec { "${name}-disabled":
         command => "semodule -d ${name}",
+        onlyif  => "test -f ${active_pp}",
       }
     }
     absent: {
-      exec { "${name}-remove":
-        command => "semodule -r ${name} > /dev/null 2>&1",
-        unless  => "! not -f ${active_modules}/${name}"
+      selmodule { $name:
+        ensure => $ensure,
+      }
+      file { $this_module_dir:
+        ensure => absent,
+        source => $sourcedir,
+        purge  => true,
+        force  => true,
       }
     }
     default: {
-      fail("Invalid status for SELinux Module: ${ensure}")
+      fail("Selinux::Module: Invalid status: ${ensure}")
     }
   }
 }
